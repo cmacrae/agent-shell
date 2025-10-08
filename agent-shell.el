@@ -1480,6 +1480,9 @@ FORMAT-ARGS are passed to `format' with ERROR-FORMAT."
                                   "  ")
                                 error-message) format-args)))
 
+(with-eval-after-load 'agent-shell
+  (require 'agent-shell-sidebar))
+
 (provide 'agent-shell)
 
 ;;; agent-shell.el ends here
