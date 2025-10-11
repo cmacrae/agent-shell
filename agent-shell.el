@@ -76,6 +76,48 @@ See `acp-make-initialize-request' for details."
   :type 'boolean
   :group 'agent-shell)
 
+(defcustom agent-shell-prompt-prefix nil
+  "Custom prompt prefix for agent shells.
+
+Can be set in two ways:
+1. A string - applies to all providers (e.g., \"AI> \")
+2. An alist mapping provider symbols to strings:
+   `((anthropic . \"Claude> \")
+     (google . \"Gemini> \")
+     (openai . \"GPT> \")
+     (goose . \"Goose> \"))
+
+When nil, uses the default prompt for each provider.
+Provider symbols are: `anthropic', `google', `openai', `goose'."
+  :type '(choice (const :tag "Use default prompts" nil)
+                 (string :tag "Use same prefix for all providers")
+                 (alist :tag "Per-provider prefixes"
+                        :key-type (choice (const :tag "Anthropic Claude Code" anthropic)
+                                          (const :tag "Google Gemini" google)
+                                          (const :tag "OpenAI Codex" openai)
+                                          (const :tag "Goose Agent" goose))
+                        :value-type string))
+  :group 'agent-shell)
+
+(defun agent-shell--resolve-prompt-prefix (provider default-prefix)
+  "Resolve the prompt prefix for PROVIDER using DEFAULT-PREFIX as fallback.
+
+PROVIDER should be a symbol: `anthropic', `google', `openai', or `goose'.
+Returns a cons cell (PROMPT . PROMPT-REGEXP) where PROMPT is the display string
+and PROMPT-REGEXP is the regexp-quoted version for matching."
+  (let ((prompt (cond
+                 ;; If agent-shell-prompt-prefix is a string, use it for all providers
+                 ((stringp agent-shell-prompt-prefix)
+                  agent-shell-prompt-prefix)
+                 ;; If it's an alist, look up the provider-specific value
+                 ((and (listp agent-shell-prompt-prefix)
+                       agent-shell-prompt-prefix)
+                  (or (alist-get provider agent-shell-prompt-prefix)
+                      default-prefix))
+                 ;; Otherwise use the default
+                 (t default-prefix))))
+    (cons prompt (regexp-quote prompt))))
+
 (cl-defun agent-shell--make-state (&key buffer client-maker needs-authentication authenticate-request-maker)
   "Construct shell agent state with BUFFER.
 
@@ -139,7 +181,7 @@ and AUTHENTICATE-REQUEST-MAKER."
   "S-TAB" #'agent-shell-previous-item
   "C-c C-c" #'agent-shell-interrupt)
 
-(shell-maker-define-major-mode (agent-shell--make-config) agent-shell-mode-map)
+(shell-maker-define-major-mode (agent-shell--make-config :prompt "" :prompt-regexp "") agent-shell-mode-map)
 
 (cl-defun agent-shell--handle (&key command shell)
   "Handle COMMAND using `shell-maker' SHELL."

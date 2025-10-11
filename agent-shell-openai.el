@@ -71,15 +71,16 @@ The first element is the command name, and the rest are command parameters."
     (user-error "Please migrate to use agent-shell-openai-authentication and eval (setq agent-shell-openai-key nil)"))
   (agent-shell--ensure-executable (car agent-shell-openai-codex-command)
                                   "See https://github.com/cola-io/codex-acp for installation.")
-  (let ((api-key (agent-shell-openai-key)))
+  (let* ((api-key (agent-shell-openai-key))
+         (prompt-pair (agent-shell--resolve-prompt-prefix 'openai "Codex> ")))
     (unless api-key
       (user-error "Please set your `agent-shell-openai-authentication'"))
     (agent-shell--start
      :new-session t
      :mode-line-name "Codex"
      :buffer-name "Codex"
-     :shell-prompt "Codex> "
-     :shell-prompt-regexp "Codex> "
+     :shell-prompt (car prompt-pair)
+     :shell-prompt-regexp (cdr prompt-pair)
      :welcome-function #'agent-shell-openai--codex-welcome-message
      :icon-name "openai.png"
      :client-maker (lambda ()
