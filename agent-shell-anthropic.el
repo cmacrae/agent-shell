@@ -98,16 +98,17 @@ Example usage to set a custom Anthropic API base URL:
   (interactive)
   (agent-shell--ensure-executable (car agent-shell-anthropic-claude-command)
                                   "See https://github.com/zed-industries/claude-code-acp for installation.")
-  (agent-shell--start
-   :new-session t
-   :mode-line-name "Claude Code"
-   :buffer-name "Claude Code"
-   :shell-prompt "Claude Code> "
-   :shell-prompt-regexp "Claude Code> "
-   :icon-name "anthropic.png"
-   :welcome-function #'agent-shell-anthropic--claude-code-welcome-message
-   :client-maker (lambda ()
-                   (agent-shell-anthropic-make-claude-client))))
+  (let* ((prompt-pair (agent-shell--resolve-prompt-prefix 'anthropic "Claude Code> ")))
+    (agent-shell--start
+     :new-session t
+     :mode-line-name "Claude Code"
+     :buffer-name "Claude Code"
+     :shell-prompt (car prompt-pair)
+     :shell-prompt-regexp (cdr prompt-pair)
+     :icon-name "anthropic.png"
+     :welcome-function #'agent-shell-anthropic--claude-code-welcome-message
+     :client-maker (lambda ()
+                     (agent-shell-anthropic-make-claude-client)))))
 
 (defun agent-shell-anthropic-make-claude-client ()
   "Create a Claude Code ACP client.

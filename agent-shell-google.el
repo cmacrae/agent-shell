@@ -93,23 +93,24 @@ The first element is the command name, and the rest are command parameters."
     (user-error "Please migrate to use agent-shell-google-authentication and eval (setq agent-shell-google-key nil)"))
   (agent-shell--ensure-executable (car agent-shell-google-gemini-command)
                                   "See https://github.com/google-gemini/gemini-cli for installation.")
-  (agent-shell--start
-   :new-session t
-   :mode-line-name "Gemini"
-   :buffer-name "Gemini"
-   :shell-prompt "Gemini> "
-   :shell-prompt-regexp "Gemini> "
-   :icon-name "gemini.png"
-   :welcome-function #'agent-shell-google--gemini-welcome-message
-   :needs-authentication t
-   :authenticate-request-maker (lambda ()
-                                 (cond ((map-elt agent-shell-google-authentication :api-key)
-                                        (acp-make-authenticate-request :method-id "gemini-api-key"))
-                                       ((map-elt agent-shell-google-authentication :vertex-ai)
-                                        (acp-make-authenticate-request :method-id "vertex-ai"))
-                                       (t
-                                        (acp-make-authenticate-request :method-id "oauth-personal"))))
-   :client-maker #'agent-shell-google-make-gemini-client))
+  (let* ((prompt-pair (agent-shell--resolve-prompt-prefix 'google "Gemini> ")))
+    (agent-shell--start
+     :new-session t
+     :mode-line-name "Gemini"
+     :buffer-name "Gemini"
+     :shell-prompt (car prompt-pair)
+     :shell-prompt-regexp (cdr prompt-pair)
+     :icon-name "gemini.png"
+     :welcome-function #'agent-shell-google--gemini-welcome-message
+     :needs-authentication t
+     :authenticate-request-maker (lambda ()
+                                   (cond ((map-elt agent-shell-google-authentication :api-key)
+                                          (acp-make-authenticate-request :method-id "gemini-api-key"))
+                                         ((map-elt agent-shell-google-authentication :vertex-ai)
+                                          (acp-make-authenticate-request :method-id "vertex-ai"))
+                                         (t
+                                          (acp-make-authenticate-request :method-id "oauth-personal"))))
+     :client-maker #'agent-shell-google-make-gemini-client)))
 
 (defun agent-shell-google-make-gemini-client ()
   "Create a Gemini client using configured authentication.

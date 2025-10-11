@@ -304,37 +304,40 @@ Returns an integer representing the final width in columns."
   "Create agent session for PROVIDER with BASE-NAME."
   (pcase provider
     ('anthropic
-     (agent-shell--start
-      :no-focus t
-      :new-session t
-      :mode-line-name "Claude Code"
-      :buffer-name base-name
-      :shell-prompt "Claude Code> "
-      :shell-prompt-regexp "Claude Code> "
-      :icon-name "anthropic.png"
-      :welcome-function #'agent-shell-anthropic--claude-code-welcome-message
-      :client-maker #'agent-shell-anthropic-make-claude-client))
+     (let* ((prompt-pair (agent-shell--resolve-prompt-prefix 'anthropic "Claude Code> ")))
+       (agent-shell--start
+        :no-focus t
+        :new-session t
+        :mode-line-name "Claude Code"
+        :buffer-name base-name
+        :shell-prompt (car prompt-pair)
+        :shell-prompt-regexp (cdr prompt-pair)
+        :icon-name "anthropic.png"
+        :welcome-function #'agent-shell-anthropic--claude-code-welcome-message
+        :client-maker #'agent-shell-anthropic-make-claude-client)))
     ('google
-     (agent-shell--start
-      :no-focus t
-      :new-session t
-      :mode-line-name "Gemini"
-      :buffer-name base-name
-      :shell-prompt "Gemini> "
-      :shell-prompt-regexp "Gemini> "
-      :icon-name "gemini.png"
-      :welcome-function #'agent-shell-google--gemini-welcome-message
-      :needs-authentication t
-      :authenticate-request-maker (lambda ()
-                                    (cond ((map-elt agent-shell-google-authentication :api-key)
-                                           (acp-make-authenticate-request :method-id "gemini-api-key"))
-                                          ((map-elt agent-shell-google-authentication :vertex-ai)
-                                           (acp-make-authenticate-request :method-id "vertex-ai"))
-                                          (t
-                                           (acp-make-authenticate-request :method-id "oauth-personal"))))
-      :client-maker #'agent-shell-google-make-gemini-client))
+     (let* ((prompt-pair (agent-shell--resolve-prompt-prefix 'google "Gemini> ")))
+       (agent-shell--start
+        :no-focus t
+        :new-session t
+        :mode-line-name "Gemini"
+        :buffer-name base-name
+        :shell-prompt (car prompt-pair)
+        :shell-prompt-regexp (cdr prompt-pair)
+        :icon-name "gemini.png"
+        :welcome-function #'agent-shell-google--gemini-welcome-message
+        :needs-authentication t
+        :authenticate-request-maker (lambda ()
+                                      (cond ((map-elt agent-shell-google-authentication :api-key)
+                                             (acp-make-authenticate-request :method-id "gemini-api-key"))
+                                            ((map-elt agent-shell-google-authentication :vertex-ai)
+                                             (acp-make-authenticate-request :method-id "vertex-ai"))
+                                            (t
+                                             (acp-make-authenticate-request :method-id "oauth-personal"))))
+        :client-maker #'agent-shell-google-make-gemini-client)))
     ('openai
-     (let ((api-key (agent-shell-openai-key)))
+     (let* ((api-key (agent-shell-openai-key))
+            (prompt-pair (agent-shell--resolve-prompt-prefix 'openai "Codex> ")))
        (unless api-key
          (user-error "Please set your `agent-shell-openai-authentication'"))
        (agent-shell--start
@@ -342,8 +345,8 @@ Returns an integer representing the final width in columns."
         :new-session t
         :mode-line-name "Codex"
         :buffer-name base-name
-        :shell-prompt "Codex> "
-        :shell-prompt-regexp "Codex> "
+        :shell-prompt (car prompt-pair)
+        :shell-prompt-regexp (cdr prompt-pair)
         :icon-name "openai.png"
         :welcome-function #'agent-shell-openai--codex-welcome-message
         :client-maker (lambda ()
@@ -352,16 +355,17 @@ Returns an integer representing the final width in columns."
                          :command-params (cdr agent-shell-openai-codex-command)
                          :environment-variables (list (format "OPENAI_API_KEY=%s" api-key)))))))
     ('goose
-     (agent-shell--start
-      :no-focus t
-      :new-session t
-      :mode-line-name "Goose"
-      :buffer-name base-name
-      :shell-prompt "Goose> "
-      :shell-prompt-regexp "Goose> "
-      :icon-name "goose.png"
-      :welcome-function #'agent-shell-goose--welcome-message
-      :client-maker #'agent-shell-goose-make-client))
+     (let* ((prompt-pair (agent-shell--resolve-prompt-prefix 'goose "Goose> ")))
+       (agent-shell--start
+        :no-focus t
+        :new-session t
+        :mode-line-name "Goose"
+        :buffer-name base-name
+        :shell-prompt (car prompt-pair)
+        :shell-prompt-regexp (cdr prompt-pair)
+        :icon-name "goose.png"
+        :welcome-function #'agent-shell-goose--welcome-message
+        :client-maker #'agent-shell-goose-make-client)))
     (_ (error "Unknown provider: %s" provider))))
 
 (defun agent-shell-sidebar--clean-up ()
