@@ -99,6 +99,31 @@ Provider symbols are: `anthropic', `google', `openai', `goose'."
                         :value-type string))
   :group 'agent-shell)
 
+(defcustom agent-shell-follow-edits nil
+  "Whether to automatically visit files that the agent is editing.
+
+When non-nil, Emacs will automatically switch to files being modified
+by the agent, allowing you to see changes as they happen.
+
+This setting can be:
+- nil: Do not follow edits (default)
+- t: Follow edits by visiting files in the current window
+- \\='other-window: Follow edits by visiting files in another window
+- \\='display: Show files without selecting the window"
+  :type '(choice (const :tag "Do not follow edits" nil)
+                 (const :tag "Follow in current window" t)
+                 (const :tag "Follow in other window" other-window)
+                 (const :tag "Display without selecting" display))
+  :group 'agent-shell)
+
+(defcustom agent-shell-follow-edits-delay 0.3
+  "Delay in seconds before following to a file being edited.
+
+This prevents rapid buffer switching when the agent makes multiple
+quick edits.  Set to 0 for immediate following."
+  :type 'number
+  :group 'agent-shell)
+
 (defun agent-shell--resolve-prompt-prefix (provider default-prefix)
   "Resolve the prompt prefix for PROVIDER using DEFAULT-PREFIX as fallback.
 
@@ -116,7 +141,9 @@ and PROMPT-REGEXP is the regexp-quoted version for matching."
                       default-prefix))
                  ;; Otherwise use the default
                  (t default-prefix))))
-    (cons prompt (regexp-quote prompt))))
+    (if prompt
+        (cons prompt (regexp-quote prompt))
+      (cons "" ""))))
 
 (cl-defun agent-shell--make-state (&key buffer client-maker needs-authentication authenticate-request-maker)
   "Construct shell agent state with BUFFER.
@@ -345,22 +372,24 @@ and AUTHENTICATE-REQUEST-MAKER."
            (let ((update (map-elt (map-elt notification 'params) 'update)))
              (cond
               ((equal (map-elt update 'sessionUpdate) "tool_call")
-               (agent-shell--save-tool-call
-                state
-                (map-elt update 'toolCallId)
-                (append (list (cons :title (map-elt update 'title))
-                              (cons :status (map-elt update 'status))
-                              (cons :kind (map-elt update 'kind))
-                              (cons :command (map-nested-elt update '(rawInput command)))
-                              (cons :description (map-nested-elt update '(rawInput description)))
-                              (cons :content (map-elt update 'content)))
-                        (when-let ((diff (agent-shell--make-diff-info (map-elt update 'content))))
-                          (list (cons :diff diff)))))
-               (agent-shell--update-dialog-block
-                :state state
-                :block-id (map-elt update 'toolCallId)
-                :label-left (agent-shell-make-tool-call-label
-                             state (map-elt update 'toolCallId)))
+               (let ((tool-call-id (map-elt update 'toolCallId)))
+                 (agent-shell--save-tool-call
+                  state
+                  tool-call-id
+                  (append (list (cons :title (map-elt update 'title))
+                                (cons :status (map-elt update 'status))
+                                (cons :kind (map-elt update 'kind))
+                                (cons :command (map-nested-elt update '(rawInput command)))
+                                (cons :description (map-nested-elt update '(rawInput description)))
+                                (cons :content (map-elt update 'content))
+                                (cons :locations (map-elt update 'locations)))
+                          (when-let ((diff (agent-shell--make-diff-info (map-elt update 'content))))
+                            (list (cons :diff diff)))))
+                 (agent-shell--update-dialog-block
+                  :state state
+                  :block-id tool-call-id
+                  :label-left (agent-shell-make-tool-call-label
+                               state tool-call-id)))
                (map-put! state :last-entry-type "tool_call"))
               ((equal (map-elt update 'sessionUpdate) "agent_thought_chunk")
                (let-alist update
@@ -415,6 +444,9 @@ and AUTHENTICATE-REQUEST-MAKER."
                                 (cons :content (map-elt update 'content)))
                           (when-let ((diff (agent-shell--make-diff-info (map-elt update 'content))))
                             (list (cons :diff diff)))))
+                 ;; Follow to file being edited when status changes to in_progress
+                 (when (equal (map-elt update 'status) "in_progress")
+                   (agent-shell--maybe-follow-tool-call state .toolCallId))
                  (let ((output (concat
                                 "\n\n"
                                 ;; TODO: Consider if there are other
@@ -904,6 +936,57 @@ Returns in the form:
             tool-call-overrides))
     (map-put! state :tool-calls updated-tools)))
 
+(defvar agent-shell--follow-timer nil
+  "Timer for delayed edit following.")
+
+(defun agent-shell--follow-to-location (location)
+  "Visit the file and position specified by LOCATION.
+
+LOCATION is an alist with :path and optional :line keys.
+Respects `agent-shell-follow-edits' setting for display behavior."
+  (when agent-shell-follow-edits
+    (when-let ((path (agent-shell--resolve-path (map-elt location :path))))
+      (let ((buffer (or (find-buffer-visiting path)
+                        (find-file-noselect path)))
+            (line (map-elt location :line)))
+        (when buffer
+          (pcase agent-shell-follow-edits
+            ('t
+             (switch-to-buffer buffer))
+            ('other-window
+             (switch-to-buffer-other-window buffer))
+            ('display
+             (display-buffer buffer)))
+          (with-current-buffer buffer
+            (when line
+              (goto-char (point-min))
+              (forward-line line))
+            (recenter)))))))
+
+(defun agent-shell--maybe-follow-tool-call (state tool-call-id)
+  "Maybe follow to the location of tool call identified by TOOL-CALL-ID in STATE.
+
+Uses `agent-shell-follow-edits-delay' to debounce rapid location changes."
+  (when agent-shell-follow-edits
+    (when agent-shell--follow-timer
+      (cancel-timer agent-shell--follow-timer))
+    (setq agent-shell--follow-timer
+          (run-with-timer
+           agent-shell-follow-edits-delay
+           nil
+           (lambda ()
+             (when-let* ((tool-call (map-nested-elt state `(:tool-calls ,tool-call-id)))
+                         (kind (map-elt tool-call :kind))
+                         ;; Only follow edit/write operations
+                         ((memq (intern kind) '(edit write)))
+                         (locations (map-elt tool-call :locations))
+                         ;; Take first location if multiple
+                         (location (if (vectorp locations)
+                                       (and (> (length locations) 0)
+                                            (aref locations 0))
+                                     (car locations))))
+               (agent-shell--follow-to-location location)))))))
+
 (cl-defun agent-shell--prompt-for-permission (&key model on-choice)
   "Prompt user for permission using MODEL and invoke ON-CHOICE.
 
@@ -1258,6 +1341,25 @@ by default."
   (interactive)
   (setq acp-logging-enabled (not acp-logging-enabled))
   (message "Logging: %s" (if acp-logging-enabled "ON" "OFF")))
+
+(defun agent-shell-toggle-follow-edits ()
+  "Toggle automatic following of agent edits.
+
+Cycles through the following modes:
+- nil (off) -> t (current window) -> other-window -> display -> nil"
+  (interactive)
+  (setq agent-shell-follow-edits
+        (pcase agent-shell-follow-edits
+          ('nil t)
+          ('t 'other-window)
+          ('other-window 'display)
+          ('display nil)))
+  (message "Follow edits: %s"
+           (pcase agent-shell-follow-edits
+             ('nil "OFF")
+             ('t "ON (current window)")
+             ('other-window "ON (other window)")
+             ('display "ON (display only)"))))
 
 (defun agent-shell-reset-logs ()
   "Reset all log buffers."
