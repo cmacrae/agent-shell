@@ -38,8 +38,10 @@
 (require 'acp)
 (eval-when-compile
   (require 'cl-lib))
+(require 'diff-mode)
 (require 'json)
 (require 'map)
+(require 'pulse)
 (unless (require 'markdown-overlays nil 'noerror)
   (error "Please update 'shell-maker' to v0.82.2 or newer"))
 (require 'shell-maker)
@@ -81,6 +83,97 @@ See `acp-make-initialize-request' for details."
   "Display action for agent shell buffers.
 See `display-buffer' for the format of display actions."
   :type '(cons (repeat function) alist)
+  :group 'agent-shell)
+
+(defcustom agent-shell-follow-edits nil
+  "Whether to automatically display files that the agent is editing.
+
+When non-nil, Emacs will automatically display files being modified
+by the agent in another window, allowing you to see changes as they
+happen without disrupting your current workflow."
+  :type 'boolean
+  :group 'agent-shell)
+
+(defcustom agent-shell-follow-edits-delay 0.3
+  "Delay in seconds before following to a file being edited.
+
+This prevents rapid buffer switching when the agent makes multiple
+quick edits.  Set to 0 for immediate following."
+  :type 'number
+  :group 'agent-shell)
+
+(defcustom agent-shell-highlight-edits t
+  "Whether to highlight text that the agent has just edited.
+
+When non-nil and `agent-shell-follow-edits' is enabled, edited regions
+will pulse slowly using Emacs' built-in pulse effect to make it clear
+what changed."
+  :type 'boolean
+  :group 'agent-shell)
+
+(defcustom agent-shell-edit-face 'lazy-highlight
+  "Face to use for highlighting agent edits after they are accepted.
+
+This should be a face symbol that has a :background attribute, as the
+pulsing effect works by creating a gradient from the face's background
+color to the default background color.
+
+Good choices:
+- `lazy-highlight' - Cyan/turquoise search highlighting (default)
+- `region' - Your selection color
+- `secondary-selection' - Alternative highlight color
+- `pulse-highlight-start-face' - Yellow pulse highlighting
+
+NOTE: The face MUST have a :background attribute for pulsing to be
+visible. Faces that only have foreground colors or other attributes
+will not work."
+  :type 'face
+  :group 'agent-shell)
+
+(defface agent-shell-diff-removed-face
+  '((t (:inherit diff-refine-removed)))
+  "Face for removed lines in permission preview diffs.
+By default, inherits from `diff-refine-removed', Emacs' built-in face
+for highlighting removed text in diffs.
+
+If you have magit installed and prefer its style, customize this to inherit:
+
+  (custom-set-faces
+   '(agent-shell-diff-removed-face ((t (:inherit magit-diff-removed-highlight)))))
+
+NOTE: If you customize this face to inherit from a lazily-loaded package
+\(like magit), ensure that package is loaded before agent-shell displays
+diffs, or the face will appear unstyled. You can do this by requiring the
+package in your init file, or by using it before starting an agent session.
+
+Alternative faces to consider:
+- `diff-refine-removed' - Emacs built-in refined removed face (default)
+- `diff-removed' - Standard diff removed face (less prominent)
+- `magit-diff-removed' - Magit's removed line face
+- `magit-diff-removed-highlight' - Magit's highlighted removed face"
+  :group 'agent-shell)
+
+(defface agent-shell-diff-added-face
+  '((t (:inherit diff-refine-added)))
+  "Face for added lines in permission preview diffs.
+By default, inherits from `diff-refine-added', Emacs' built-in face
+for highlighting added text in diffs.
+
+If you have magit installed and prefer its style, customize this to inherit:
+
+  (custom-set-faces
+   '(agent-shell-diff-added-face ((t (:inherit magit-diff-added-highlight)))))
+
+NOTE: If you customize this face to inherit from a lazily-loaded package
+\(like magit), ensure that package is loaded before agent-shell displays
+diffs, or the face will appear unstyled. You can do this by requiring the
+package in your init file, or by using it before starting an agent session.
+
+Alternative faces to consider:
+- `diff-refine-added' - Emacs built-in refined added face (default)
+- `diff-added' - Standard diff added face (less prominent)
+- `magit-diff-added' - Magit's added line face
+- `magit-diff-added-highlight' - Magit's highlighted added face"
   :group 'agent-shell)
 
 (cl-defun agent-shell-make-agent-config (&key no-focus new-session mode-line-name welcome-function
@@ -415,22 +508,26 @@ See `agent-shell-make-agent-config' for config format."
            (let ((update (map-elt (map-elt notification 'params) 'update)))
              (cond
               ((equal (map-elt update 'sessionUpdate) "tool_call")
-               (agent-shell--save-tool-call
-                state
-                (map-elt update 'toolCallId)
-                (append (list (cons :title (map-elt update 'title))
-                              (cons :status (map-elt update 'status))
-                              (cons :kind (map-elt update 'kind))
-                              (cons :command (map-nested-elt update '(rawInput command)))
-                              (cons :description (map-nested-elt update '(rawInput description)))
-                              (cons :content (map-elt update 'content)))
-                        (when-let ((diff (agent-shell--make-diff-info (map-elt update 'content))))
-                          (list (cons :diff diff)))))
-               (agent-shell--update-dialog-block
-                :state state
-                :block-id (map-elt update 'toolCallId)
-                :label-left (agent-shell-make-tool-call-label
-                             state (map-elt update 'toolCallId)))
+               (let ((tool-call-id (map-elt update 'toolCallId)))
+                 (agent-shell--save-tool-call
+                  state
+                  tool-call-id
+                  (append (list (cons :title (map-elt update 'title))
+                                (cons :status (map-elt update 'status))
+                                (cons :kind (map-elt update 'kind))
+                                (cons :command (map-nested-elt update '(rawInput command)))
+                                (cons :description (map-nested-elt update '(rawInput description)))
+                                (cons :content (map-elt update 'content))
+                                (cons :locations (map-elt update 'locations)))
+                          (when-let ((diff (agent-shell--make-diff-info (map-elt update 'content))))
+                            (list (cons :diff diff)))))
+                 (agent-shell--update-dialog-block
+                  :state state
+                  :block-id tool-call-id
+                  :label-left (agent-shell-make-tool-call-label
+                               state tool-call-id)))
+                 ;; Don't follow here - wait for in_progress status or permission display
+                 ;; Following immediately causes confusing jumps during permission queueing
                (map-put! state :last-entry-type "tool_call"))
               ((equal (map-elt update 'sessionUpdate) "agent_thought_chunk")
                (let-alist update
@@ -485,6 +582,9 @@ See `agent-shell-make-agent-config' for config format."
                                 (cons :content (map-elt update 'content)))
                           (when-let ((diff (agent-shell--make-diff-info (map-elt update 'content))))
                             (list (cons :diff diff)))))
+                 ;; Follow to file being edited when status changes to in_progress
+                 (when (equal (map-elt update 'status) "in_progress")
+                   (agent-shell--maybe-follow-tool-call state .toolCallId))
                  (let ((output (concat
                                 "\n\n"
                                 ;; TODO: Consider if there are other
@@ -540,27 +640,8 @@ See `agent-shell-make-agent-config' for config format."
   "Handle incoming request using SHELL, STATE, and REQUEST."
   (let-alist request
     (cond ((equal .method "session/request_permission")
-           (agent-shell--save-tool-call
-            state .params.toolCall.toolCallId
-            (append (list (cons :title .params.toolCall.title)
-                          (cons :status .params.toolCall.status)
-                          (cons :kind .params.toolCall.kind))
-                    (when-let ((diff (agent-shell--make-diff-info .params.toolCall.content)))
-                      (list (cons :diff diff)))))
-           (agent-shell--update-dialog-block
-            :state state
-            ;; block-id must be the same as the one used
-            ;; in agent-shell--delete-dialog-block param.
-            :block-id (format "permission-%s" .params.toolCall.toolCallId)
-            :body (with-current-buffer (map-elt state :buffer)
-                    (agent-shell--make-tool-call-permission-text
-                     :request request
-                     :client (map-elt state :client)
-                     :state state))
-            :expanded t
-            :navigation 'never)
-           (agent-shell-jump-to-latest-permission-button-row)
-           (map-put! state :last-entry-type "session/request_permission"))
+           ;; Add permission to queue - will be shown immediately if no permission active
+           (agent-shell--enqueue-permission state request))
           ((equal .method "fs/read_text_file")
            (agent-shell--on-fs-read-text-file-request
             :state state
@@ -599,8 +680,7 @@ LINE defaults to 1, LIMIT defaults to nil (read to end)."
 (cl-defun agent-shell--on-fs-read-text-file-request (&key state request)
   "Handle fs/read_text_file REQUEST with STATE."
   (let-alist request
-    (condition-case err
-        (let* ((path (agent-shell--resolve-path .params.path))
+    (let* ((path (agent-shell--resolve-path .params.path))
                (line (or .params.line 1))
                (limit .params.limit)
                (existing-buffer (find-buffer-visiting path))
@@ -615,48 +695,105 @@ LINE defaults to 1, LIMIT defaults to nil (read to end)."
            :client (map-elt state :client)
            :response (acp-make-fs-read-text-file-response
                       :request-id .id
-                      :content content)))
-      (error
-       (acp-send-response
-        :client (map-elt state :client)
-        :response (acp-make-fs-read-text-file-response
-                   :request-id .id
-                   :error (acp-make-error
-                           :code -32603
-                           :message (error-message-string err))))))))
+                      :content content)))))
 
 (cl-defun agent-shell--on-fs-write-text-file-request (&key state request)
   "Handle fs/write_text_file REQUEST with STATE."
   (let-alist request
-    (condition-case err
-        (let* ((path (agent-shell--resolve-path .params.path))
+    (let* ((path (agent-shell--resolve-path .params.path))
                (content .params.content)
                (dir (file-name-directory path))
-               (buffer (find-buffer-visiting path)))
+               (buffer (find-buffer-visiting path))
+               ;; Find any preview for this path and get its diff info
+               (preview-entry (seq-find (lambda (entry)
+                                          (string= (plist-get (cdr entry) :path) path))
+                                        agent-shell--permission-preview-state))
+               (preview-state (cdr preview-entry))
+               ;; Get tool-call-id: first try preview, then search tool-calls by path
+               (tool-call-id (or (car preview-entry)
+                                 (car (seq-find (lambda (entry)
+                                                  (let* ((tc-data (cdr entry))
+                                                         (tc-raw-input (map-elt tc-data :rawInput))
+                                                         (tc-path (and tc-raw-input
+                                                                      (map-elt tc-raw-input 'file_path))))
+                                                    (and tc-path
+                                                         (string= (agent-shell--resolve-path tc-path) path))))
+                                                (map-elt state :tool-calls))))))
           (when (and dir (not (file-exists-p dir)))
             (make-directory dir t))
-          (if buffer
-              ;; Buffer is open, write and save.
-              (with-current-buffer buffer
-                (let ((inhibit-read-only t))
-                  (erase-buffer)
-                  (insert content)
-                  (basic-save-buffer)))
-            ;; No open buffer, write to file directly.
-            (with-temp-file path
-              (insert content)))
-          (acp-send-response
-           :client (map-elt state :client)
-           :response (acp-make-fs-write-text-file-response
-                      :request-id .id)))
-      (error
-       (acp-send-response
-        :client (map-elt state :client)
-        :response (acp-make-fs-write-text-file-response
-                   :request-id .id
-                   :error (acp-make-error
-                           :code -32603
-                           :message (error-message-string err))))))))
+          ;; Save the preview position before removing it
+          (let ((saved-position (when preview-state
+                                  (plist-get preview-state :old-start))))
+
+            ;; Remove preview overlays before writing
+            (when preview-entry
+              (agent-shell--remove-permission-preview tool-call-id))
+
+            (if buffer
+                ;; Buffer is open, write and save.
+                (with-current-buffer buffer
+                  (let ((inhibit-read-only t))
+                    (erase-buffer)
+                    (insert content)
+                    (basic-save-buffer)
+
+                    ;; Highlight the changes if follow-edits is enabled
+                    (when (and agent-shell-follow-edits agent-shell-highlight-edits)
+                      ;; Get the diff info from rawInput if available
+                      (if-let* ((tool-call (and tool-call-id (map-nested-elt state `(:tool-calls ,tool-call-id))))
+                                (raw-input (map-elt tool-call :rawInput)))
+                          (progn
+                            (let-alist raw-input
+                              (when (and .old_string .new_string)
+                                ;; First, search for the new_string in the buffer
+                                (let ((found-pos (save-excursion
+                                                 (goto-char (point-min))
+                                                 (when (search-forward .new_string nil t)
+                                                   (match-beginning 0)))))
+                                (when found-pos
+                                  ;; Compute where the changed portion is within new_string
+                                  (if-let ((edit-info (agent-shell--compute-edit-region .old_string .new_string)))
+                                      (let* ((prefix-len (car edit-info))
+                                             (changed-text (cdr edit-info))
+                                             ;; Position of changed portion in buffer
+                                             (changed-start (+ found-pos prefix-len))
+                                             (changed-end (+ changed-start (length changed-text)))
+                                             (window (get-buffer-window buffer)))
+                                        ;; Position window and cursor at the changed portion
+                                        (goto-char changed-start)
+                                        (when window
+                                          (set-window-point window changed-start)
+                                          (with-selected-window window
+                                            (recenter)))
+                                        ;; Pulse highlight the changed portion
+                                        (let ((pulse-flag t)
+                                              (pulse-delay 0.1)
+                                              (pulse-iterations 50))
+                                          (pulse-momentary-highlight-region changed-start changed-end agent-shell-edit-face)))
+                                    ;; Fallback: highlight entire new_string if compute fails
+                                    (let* ((new-start found-pos)
+                                           (new-end (+ found-pos (length .new_string)))
+                                           (window (get-buffer-window buffer)))
+                                      ;; Position window
+                                      (goto-char new-start)
+                                      (when window
+                                        (set-window-point window new-start)
+                                        (with-selected-window window
+                                          (recenter)))
+                                      ;; Pulse highlight the entire new string
+                                      (let ((pulse-flag t)
+                                            (pulse-delay 0.1)
+                                            (pulse-iterations 50))
+                                        (pulse-momentary-highlight-region new-start new-end agent-shell-edit-face)))))))))))))
+              ;; No open buffer, write to file directly.
+              (progn
+                (with-temp-file path
+                  (insert content))))
+
+            (acp-send-response
+             :client (map-elt state :client)
+             :response (acp-make-fs-write-text-file-response
+                        :request-id .id))))))
 
 (defun agent-shell--resolve-path (path)
   "Resolve PATH using `agent-shell-path-resolver-function'."
@@ -820,19 +957,18 @@ Returns in the form:
                          (define-key map (vector char)
                                      (lambda ()
                                        (interactive)
-                                       (acp-send-response
-                                        :client client
-                                        :response (acp-make-session-request-permission-response
-                                                   :request-id request-id
-                                                   :option-id (map-elt action :option-id)))
-                                       ;; Hide permission after sending response.
-                                       ;; block-id must be the same as the one used as
-                                       ;; agent-shell--update-dialog-block param by "session/request_permission".
-                                       (agent-shell--delete-dialog-block :state state :block-id (format "permission-%s" .params.toolCall.toolCallId))
-                                       (message "%s" (map-elt action :option))
-                                       (goto-char (point-max))))))
-                     ;; Add diff keybinding if diff info is available
-                     (when diff
+                                       ;; Complete permission (sends response and processes next)
+                                       (agent-shell--complete-current-permission
+                                        state
+                                        (acp-make-session-request-permission-response
+                                         :request-id request-id
+                                         :option-id (map-elt action :option-id)))
+                                       ;; Only move point if not following edits or if rejecting
+                                       (unless (and agent-shell-follow-edits
+                                                    (string= (map-elt action :kind) "allow_once"))
+                                         (goto-char (point-max))))))
+                     ;; Add diff keybinding if diff info is available and follow-edits is disabled
+                     (when (and diff (not agent-shell-follow-edits))
                        (define-key map "v"
                                    (lambda ()
                                      (interactive)
@@ -852,72 +988,70 @@ Returns in the form:
                                                                               actions))
                                                                    (t nil))))
                                                      (progn
-                                                       (acp-send-response
-                                                        :client client
-                                                        :response (acp-make-session-request-permission-response
-                                                                   :request-id request-id
-                                                                   :option-id (map-elt action :option-id)))
-                                                       ;; Hide permission after sending response.
-                                                       ;; block-id must be the same as the one used as
-                                                       ;; agent-shell--update-dialog-block param by "session/request_permission".
-                                                       (agent-shell--delete-dialog-block :state state :block-id (format "permission-%s" .params.toolCall.toolCallId))
-                                                       (message "%s" (map-elt action :option))
-                                                       (goto-char (point-max)))
-                                                   (message "Ignored")))
-                                      ))))
+                                                       ;; Complete permission (sends response and processes next)
+                                                       (agent-shell--complete-current-permission
+                                                        state
+                                                        (acp-make-session-request-permission-response
+                                                         :request-id request-id
+                                                         :option-id (map-elt action :option-id)))
+                                                       ;; Only move point if not following edits or if rejecting
+                                                       (unless (and agent-shell-follow-edits
+                                                                    (equal choice 'accept))
+                                                         (goto-char (point-max))))
+                                                   (message "Ignored"))))))))
                      map))
-           (diff-button (when-let ((_ diff)
-                                   (button (agent-shell--make-button
-                                            :text "View (v)"
-                                            :help "Press v to view diff"
-                                            :kind 'permission
-                                            :keymap keymap
-                                            :action (lambda ()
-                                                      (interactive)
-                                                      (quick-diff
-                                                       :old (map-elt diff :old)
-                                                       :new (map-elt diff :new)
-                                                       :title (file-name-nondirectory (map-elt diff :file))
-                                                       :on-exit (lambda (choice)
-                                                                  (if-let ((action (cond
-                                                                                    ((equal choice 'accept)
-                                                                                     (seq-find (lambda (action)
-                                                                                                 (string= (map-elt action :kind) "allow_once"))
-                                                                                               actions))
-                                                                                    ((equal choice 'reject)
-                                                                                     (seq-find (lambda (action)
-                                                                                                 (string= (map-elt action :kind) "reject_once"))
-                                                                                               actions))
-                                                                                    (t nil))))
-                                                                      (progn
-                                                                        (acp-send-response
-                                                                         :client client
-                                                                         :response (acp-make-session-request-permission-response
-                                                                                    :request-id request-id
-                                                                                    :option-id (map-elt action :option-id)))
-                                                                        ;; Hide permission after sending response.
-                                                                        ;; block-id must be the same as the one used as
-                                                                        ;; agent-shell--update-dialog-block param by "session/request_permission".
-                                                                        (agent-shell--delete-dialog-block :state state :block-id (format "permission-%s" .params.toolCall.toolCallId))
-                                                                        (message "%s" (map-elt action :option))
-                                                                        (goto-char (point-max)))
-                                                                    (message "Ignored"))))))))
-                          ;; Make the button character navigatable (the "v" in "View (v)")
-                          (put-text-property (- (length button) 3) (- (length button) 1)
-                                             'agent-shell-permission-button t button)
-                          button)))
+           (diff-button (when (and diff (not agent-shell-follow-edits))
+                          (let ((button (agent-shell--make-button
+                                         :text "View (v)"
+                                         :help "Press v to view diff"
+                                         :kind 'permission
+                                         :keymap keymap
+                                         :action (lambda ()
+                                                   (interactive)
+                                                   (quick-diff
+                                                    :old (map-elt diff :old)
+                                                    :new (map-elt diff :new)
+                                                    :title (file-name-nondirectory (map-elt diff :file))
+                                                    :on-exit (lambda (choice)
+                                                               (if-let ((action (cond
+                                                                                 ((equal choice 'accept)
+                                                                                  (seq-find (lambda (action)
+                                                                                              (string= (map-elt action :kind) "allow_once"))
+                                                                                            actions))
+                                                                                 ((equal choice 'reject)
+                                                                                  (seq-find (lambda (action)
+                                                                                              (string= (map-elt action :kind) "reject_once"))
+                                                                                            actions))
+                                                                                 (t nil))))
+                                                                   (progn
+                                                                     ;; Complete permission (sends response and processes next)
+                                                                     (agent-shell--complete-current-permission
+                                                                      state
+                                                                      (acp-make-session-request-permission-response
+                                                                       :request-id request-id
+                                                                       :option-id (map-elt action :option-id)))
+                                                                     ;; Only move point if not following edits or if rejecting
+                                                                     (unless (and agent-shell-follow-edits
+                                                                                  (equal choice 'accept))
+                                                                       (goto-char (point-max))))
+                                                                 (message "Ignored"))))))))
+                            ;; Make the button character navigatable (the "v" in "View (v)")
+                            (put-text-property (- (length button) 3) (- (length button) 1)
+                                               'agent-shell-permission-button t button)
+                            button))))
       (let ((text (format "╭─
 
-    %s %s %s%s
+    %s %s%s %s
 
 
-    %s%s
+    %s%s %s
 
 
 ╰─"
                           (propertize agent-shell-permission-icon
                                       'font-lock-face 'warning)
                           (propertize "Tool Permission" 'font-lock-face 'bold)
+                          (or (agent-shell--permission-progress-text state) "")
                           (propertize agent-shell-permission-icon
                                       'font-lock-face 'warning)
                           (if .params.toolCall.title
@@ -936,17 +1070,16 @@ Returns in the form:
                                                       :keymap keymap
                                                       :action (lambda ()
                                                                 (interactive)
-                                                                (acp-send-response
-                                                                 :client client
-                                                                 :response (acp-make-session-request-permission-response
-                                                                            :request-id request-id
-                                                                            :option-id (map-elt action :option-id)))
-                                                                ;; Hide permission after sending response.
-                                                                ;; block-id must be the same as the one used as
-                                                                ;; agent-shell--update-dialog-block param by "session/request_permission".
-                                                                (agent-shell--delete-dialog-block :state state :block-id (format "permission-%s" .params.toolCall.toolCallId))
-                                                                (message "Selected: %s" (map-elt action :option))
-                                                                (goto-char (point-max))))))
+                                                                ;; Complete permission (sends response and processes next)
+                                                                (agent-shell--complete-current-permission
+                                                                 state
+                                                                 (acp-make-session-request-permission-response
+                                                                  :request-id request-id
+                                                                  :option-id (map-elt action :option-id)))
+                                                                ;; Only move point if not following edits or if rejecting
+                                                                (unless (and agent-shell-follow-edits
+                                                                             (string= (map-elt action :kind) "allow_once"))
+                                                                  (goto-char (point-max)))))))
                                          ;; Make the button character navigatable.
                                          ;;
                                          ;; For example, the "y" in:
@@ -979,6 +1112,590 @@ Returns in the form:
               (map-merge 'alist old-tool-call tool-call-overrides)
             tool-call-overrides))
     (map-put! state :tool-calls updated-tools)))
+
+
+(defvar-local agent-shell--follow-timer nil
+  "Timer for debouncing follow-to-location calls.")
+
+(defvar-local agent-shell--permission-queue nil
+  "Queue of pending permission requests waiting to be processed.
+Each element is a full request alist from session/request_permission.")
+
+(defvar-local agent-shell--current-permission nil
+  "Currently active permission request being shown to user.
+This is a full request alist from session/request_permission, or nil if none active.")
+
+(defvar-local agent-shell--permission-preview-state nil
+  "Alist mapping tool-call-id to preview state during permission prompts.
+Each entry is (tool-call-id . plist) where plist contains:
+  :buffer - the buffer where preview is shown
+  :overlays - list of overlays showing the preview
+  :old-text - the original text before preview
+  :old-point - the original point position
+  :path - the file path")
+
+(defvar-local agent-shell--permission-batch-size nil
+  "Total number of permissions in the current batch.
+Set when the first permission of a batch is enqueued, remains constant
+throughout the batch to show 'Permission N of T' correctly.")
+
+(defvar-local agent-shell--permission-batch-position 0
+  "Current position within the permission batch.
+Incremented as each permission is processed.")
+
+(defun agent-shell--enqueue-permission (state request)
+  "Add permission REQUEST to STATE's queue and process if none active.
+REQUEST should be the full request alist from session/request_permission."
+  (with-current-buffer (map-elt state :buffer)
+    (let ((had-current agent-shell--current-permission))
+      ;; If starting a new batch, initialize batch tracking by counting pending tool calls
+      ;; Only initialize if we don't already have a batch in progress (batch-size is nil)
+      (when (and (not agent-shell--current-permission)
+                 (null agent-shell--permission-queue)
+                 (not agent-shell--permission-batch-size))
+        (let* ((tool-calls (map-elt state :tool-calls))
+               (pending-count (length (seq-filter
+                                      (lambda (entry)
+                                        (let* ((tc (cdr entry))
+                                               (status (map-elt tc :status)))
+                                          (equal status "pending")))
+                                      tool-calls))))
+          (setq agent-shell--permission-batch-size pending-count
+                agent-shell--permission-batch-position 0)))
+
+      (setq agent-shell--permission-queue
+            (append agent-shell--permission-queue (list request)))
+
+      ;; If no permission is currently being shown, process the next one
+      (if agent-shell--current-permission
+          ;; Update the current permission dialog to show the new total
+          (when (> agent-shell--permission-batch-size 1)
+            (agent-shell--update-permission-counter state))
+        ;; No current permission, process the next one
+        (agent-shell--process-next-permission state)))))
+
+(defun agent-shell--update-permission-counter (state)
+  "Update the permission counter in the currently displayed permission dialog.
+This is called when new permissions are enqueued while a permission is being shown."
+  (with-current-buffer (map-elt state :buffer)
+    (when agent-shell--current-permission
+      (let-alist agent-shell--current-permission
+        ;; Re-render the permission dialog with updated counter
+        (agent-shell--update-dialog-block
+         :state state
+         :block-id (format "permission-%s" .params.toolCall.toolCallId)
+         :body (agent-shell--make-tool-call-permission-text
+                :request agent-shell--current-permission
+                :client (map-elt state :client)
+                :state state)
+         :expanded t
+         :navigation 'never)))))
+
+(defun agent-shell--process-next-permission (state)
+  "Dequeue and show the next permission request from STATE's queue."
+  (with-current-buffer (map-elt state :buffer)
+    (if agent-shell--permission-queue
+        (let ((request (pop agent-shell--permission-queue)))
+          (setq agent-shell--current-permission request)
+          ;; Increment position in batch (0-based, so first permission is at position 0)
+          (setq agent-shell--permission-batch-position
+                (1+ agent-shell--permission-batch-position))
+          ;; Now show the permission dialog and preview
+          (agent-shell--show-permission-request state request))
+      ;; Queue is empty, check if we should reset batch counters
+      ;; Reset if we've processed all permissions in the batch (position >= batch-size)
+      (when (and agent-shell--permission-batch-size
+                 (>= agent-shell--permission-batch-position
+                     agent-shell--permission-batch-size))
+        (setq agent-shell--permission-batch-size nil
+              agent-shell--permission-batch-position 0)))))
+
+(defun agent-shell--show-permission-request (state request)
+  "Display permission REQUEST with STATE, including preview and dialog."
+  (let-alist request
+    ;; Save tool call information
+    (agent-shell--save-tool-call
+     state .params.toolCall.toolCallId
+     (append (list (cons :title .params.toolCall.title)
+                   (cons :status .params.toolCall.status)
+                   (cons :kind .params.toolCall.kind)
+                   (cons :content .params.toolCall.content)
+                   (cons :locations .params.toolCall.locations)
+                   (cons :rawInput .params.toolCall.rawInput))
+             (when-let ((diff (agent-shell--make-diff-info .params.toolCall.content)))
+               (list (cons :diff diff)))))
+    ;; Create preview for edit/write operations when follow-edits is enabled
+    ;; Extract edit info from rawInput (file_path, old_string, new_string)
+    (when (and agent-shell-follow-edits
+               .params.toolCall.rawInput)
+      ;; Save tool-call-id before entering nested let-alist
+      (let ((tool-call-id .params.toolCall.toolCallId))
+        (let-alist .params.toolCall.rawInput
+          (when (and .file_path .old_string .new_string)
+            (let ((diff-info (list :old .old_string :new .new_string :file .file_path))
+                  (location (list (cons 'path .file_path))))
+              ;; Wrap in error handling to ensure permission dialog is shown even if preview fails
+              (condition-case err
+                  (agent-shell--create-permission-preview
+                   tool-call-id
+                   diff-info
+                   location)
+                (error
+                 (message "Warning: Failed to create permission preview: %s" (error-message-string err)))))))))
+    ;; Display the permission dialog
+    (agent-shell--update-dialog-block
+     :state state
+     ;; block-id must be the same as the one used
+     ;; in agent-shell--delete-dialog-block param.
+     :block-id (format "permission-%s" .params.toolCall.toolCallId)
+     :body (with-current-buffer (map-elt state :buffer)
+             (agent-shell--make-tool-call-permission-text
+              :request request
+              :client (map-elt state :client)
+              :state state))
+     :expanded t
+     :navigation 'never)
+    ;; Jump to permission buttons in the agent shell buffer
+    ;; This keeps focus in the agent shell while the preview shows in another window
+    (agent-shell-jump-to-latest-permission-button-row)
+    (map-put! state :last-entry-type "session/request_permission")))
+
+(defun agent-shell--complete-current-permission (state response)
+  "Complete current permission in STATE with RESPONSE, then show next.
+RESPONSE is the ACP response to send back to the client."
+  (with-current-buffer (map-elt state :buffer)
+    (when agent-shell--current-permission
+      (let-alist agent-shell--current-permission
+        (let ((tool-call-id .params.toolCall.toolCallId))
+          ;; Clean up preview overlays
+          (agent-shell--remove-permission-preview tool-call-id)
+          ;; Send the response
+          (acp-send-response
+           :client (map-elt state :client)
+           :response response)
+          ;; Delete the permission dialog block
+          (agent-shell--delete-dialog-block
+           :state state
+           :block-id (format "permission-%s" tool-call-id))))
+      ;; Clear current and process next
+      (setq agent-shell--current-permission nil)
+      (agent-shell--process-next-permission state))))
+
+(defun agent-shell--permission-progress-text (state)
+  "Return text showing permission progress, e.g., 'Permission 2 of 5'.
+STATE contains the agent shell state with buffer reference.
+Returns nil if only one permission total.
+
+Uses batch tracking variables to maintain consistent total throughout the batch."
+  (with-current-buffer (map-elt state :buffer)
+    (when (and agent-shell--current-permission
+               agent-shell--permission-batch-size
+               (> agent-shell--permission-batch-size 1))
+      (format " · Permission %d of %d"
+              agent-shell--permission-batch-position
+              agent-shell--permission-batch-size))))
+
+(defun agent-shell--extract-changed-region (old-text new-text)
+  "Extract just the changed region from OLD-TEXT and NEW-TEXT.
+Returns a cons cell (old-changed . new-changed) of the minimal differing parts.
+If texts are very different, returns (old-text . new-text)."
+  (let* ((old-lines (split-string old-text "\n"))
+         (new-lines (split-string new-text "\n"))
+         (old-len (length old-lines))
+         (new-len (length new-lines))
+         ;; Find common prefix
+         (prefix-len 0)
+         ;; Find common suffix
+         (suffix-len 0))
+
+    ;; Count matching lines from the start
+    (while (and (< prefix-len old-len)
+                (< prefix-len new-len)
+                (string= (nth prefix-len old-lines)
+                         (nth prefix-len new-lines)))
+      (setq prefix-len (1+ prefix-len)))
+
+    ;; Count matching lines from the end
+    (while (and (< suffix-len (- old-len prefix-len))
+                (< suffix-len (- new-len prefix-len))
+                (string= (nth (- old-len suffix-len 1) old-lines)
+                         (nth (- new-len suffix-len 1) new-lines)))
+      (setq suffix-len (1+ suffix-len)))
+
+    ;; Extract the changed middle part
+    (let* ((old-changed-lines (seq-subseq old-lines prefix-len (- old-len suffix-len)))
+           (new-changed-lines (seq-subseq new-lines prefix-len (- new-len suffix-len)))
+           (old-changed (string-join old-changed-lines "\n"))
+           (new-changed (string-join new-changed-lines "\n")))
+
+      ;; Return the changed portions and metadata
+      (list :prefix-lines prefix-len
+            :old-changed old-changed
+            :new-changed new-changed
+            :old-changed-lines (length old-changed-lines)
+            :new-changed-lines (length new-changed-lines)))))
+
+(defun agent-shell--format-diff-preview (old-text new-text)
+  "Format OLD-TEXT and NEW-TEXT as a colorized unified diff.
+Returns a propertized string showing deletions and additions using
+customizable faces `agent-shell-diff-removed-face' and
+`agent-shell-diff-added-face'."
+  (let* ((old-lines (split-string old-text "\n"))
+         (new-lines (split-string new-text "\n"))
+         (result '()))
+
+    ;; Add deleted lines
+    (dolist (line old-lines)
+      (push (propertize (concat "-" line)
+                        'face 'agent-shell-diff-removed-face)
+            result))
+
+    ;; Add new lines
+    (dolist (line new-lines)
+      (push (propertize (concat "+" line)
+                        'face 'agent-shell-diff-added-face)
+            result))
+
+    ;; Return in correct order with newlines
+    (string-join (nreverse result) "\n")))
+
+(defun agent-shell--position-window-at-change (window buffer position)
+  "Position WINDOW showing BUFFER at POSITION."
+  (when (and (window-live-p window)
+             (buffer-live-p buffer))
+    ;; Calculate window-start to center the position in the window
+    ;; and immediately position using set-window-start
+    (let ((target-start (with-current-buffer buffer
+                          (save-excursion
+                            (goto-char position)
+                            ;; Use max to ensure we don't try to scroll before buffer start
+                            (let* ((lines-before (/ (window-height window) 2))
+                                   (current-line (line-number-at-pos))
+                                   ;; Can't go back more lines than exist
+                                   (lines-to-move (min lines-before (1- current-line))))
+                              (forward-line (- lines-to-move))
+                              ;; Ensure we're not at point-min unless position is there
+                              (max (point-min) (point)))))))
+      (set-window-start window target-start t)  ; t = force redisplay
+      (set-window-point window position))
+
+    ;; Verify and re-apply after initial redisplay
+    (run-at-time
+     0.05 nil
+     (lambda ()
+       (when (and (window-live-p window)
+                  (buffer-live-p buffer))
+         (let ((target-start (with-current-buffer buffer
+                               (save-excursion
+                                 (goto-char position)
+                                 (let* ((lines-before (/ (window-height window) 2))
+                                        (current-line (line-number-at-pos))
+                                        (lines-to-move (min lines-before (1- current-line))))
+                                   (forward-line (- lines-to-move))
+                                   (max (point-min) (point)))))))
+           (set-window-start window target-start t)
+           (set-window-point window position)))))
+
+    ;; Final verification after all redisplay completes
+    (run-at-time
+     0.15 nil
+     (lambda ()
+       (when (and (window-live-p window)
+                  (buffer-live-p buffer))
+         (let ((target-start (with-current-buffer buffer
+                               (save-excursion
+                                 (goto-char position)
+                                 (let* ((lines-before (/ (window-height window) 2))
+                                        (current-line (line-number-at-pos))
+                                        (lines-to-move (min lines-before (1- current-line))))
+                                   (forward-line (- lines-to-move))
+                                   (max (point-min) (point)))))))
+           (set-window-start window target-start t)
+           (set-window-point window position)))))))
+
+(defun agent-shell--search-for-text-with-strategies (text acp-line-hint)
+  "Search for TEXT using multiple strategies, prioritizing ACP-LINE-HINT.
+Returns the match position or nil if not found.
+Strategies are tried in order of reliability:
+1. Near ACP line hint (±50 lines)
+2. Forward from ACP line hint
+3. Backward from ACP line hint
+4. Full buffer search from beginning"
+  (let ((match-pos nil))
+    (save-excursion
+      ;; Strategy 1: Search near ACP-provided line
+      (when (and acp-line-hint (numberp acp-line-hint) (not match-pos))
+        (goto-char (point-min))
+        (forward-line acp-line-hint)
+        (let ((search-start (save-excursion
+                              (forward-line -50)
+                              (point)))
+              (search-end (save-excursion
+                            (forward-line 100)
+                            (point))))
+          (goto-char search-start)
+          (when (search-forward text search-end t)
+            (setq match-pos (match-beginning 0)))))
+
+      ;; Strategy 2: Full buffer search forward from ACP line
+      (when (and acp-line-hint (numberp acp-line-hint) (not match-pos))
+        (goto-char (point-min))
+        (forward-line acp-line-hint)
+        (when (search-forward text nil t)
+          (setq match-pos (match-beginning 0))))
+
+      ;; Strategy 3: Full buffer search backward from ACP line
+      (when (and acp-line-hint (numberp acp-line-hint) (not match-pos))
+        (goto-char (point-min))
+        (forward-line acp-line-hint)
+        (when (search-backward text nil t)
+          (setq match-pos (match-beginning 0))))
+
+      ;; Strategy 4: Fall back to full buffer search from beginning
+      (when (not match-pos)
+        (goto-char (point-min))
+        (when (search-forward text nil t)
+          (setq match-pos (match-beginning 0))))
+      match-pos)))
+
+(defun agent-shell--create-permission-preview (tool-call-id diff-info location)
+  "Show preview of changes for TOOL-CALL-ID using a colorized unified diff.
+DIFF-INFO is a plist with :old, :new, and :file keys.
+LOCATION is an alist with 'path and optional 'line keys.
+Displays deletions and additions in a unified diff format."
+  (when (and agent-shell-follow-edits diff-info location)
+    (let* ((path (agent-shell--resolve-path (map-elt location 'path)))
+           (old-text (plist-get diff-info :old))
+           (new-text (plist-get diff-info :new))
+           (line (map-elt location 'line))
+           ;; Save reference to current buffer (agent-shell buffer) before switching contexts
+           (agent-shell-buffer (current-buffer)))
+      (when (and path old-text new-text)
+        (let ((buffer (or (find-buffer-visiting path)
+                          (find-file-noselect path))))
+          (when buffer
+            (with-current-buffer buffer
+              (let ((inhibit-read-only t))
+                (save-excursion
+                  ;; Start from the beginning or specified line
+                  (goto-char (point-min))
+                  (when line
+                    (forward-line line))
+                  (let* ((start-pos (point))
+                         ;; Extract the changed region
+                         (change-info (agent-shell--extract-changed-region old-text new-text))
+                         (prefix-lines (plist-get change-info :prefix-lines))
+                         (old-changed (plist-get change-info :old-changed))
+                         (new-changed (plist-get change-info :new-changed))
+                         (old-changed-lines (plist-get change-info :old-changed-lines))
+                         (new-changed-lines (plist-get change-info :new-changed-lines)))
+
+                      ;; Use multi-strategy search to find the text, prioritizing ACP line hint
+                      (let ((match-pos (agent-shell--search-for-text-with-strategies old-text line)))
+                        (if match-pos
+                            (progn
+                              (let* ((old-start match-pos)
+                                     (old-end (+ match-pos (length old-text)))
+                                     ;; Calculate position of the changed region within the match
+                                     (changed-start (save-excursion
+                                                      (goto-char old-start)
+                                                      (forward-line prefix-lines)
+                                                      (point)))
+                                     (changed-end-raw (save-excursion
+                                                        (goto-char changed-start)
+                                                        (forward-line old-changed-lines)
+                                                        (point)))
+                                     ;; For pure insertions (zero-length overlays), extend to next line
+                                     ;; or at least one character to make overlay visible
+                                     (changed-end (if (= changed-start changed-end-raw)
+                                                      (save-excursion
+                                                        (goto-char changed-start)
+                                                        (if (and (eolp) (= (point) (point-max)))
+                                                            ;; At end of file: insert a newline so overlay has content
+                                                            (progn
+                                                              (insert "\n")
+                                                              (point))
+                                                          (if (eolp)
+                                                              ;; At end of line (but not EOF), include the newline
+                                                              (min (point-max) (1+ (point)))
+                                                            ;; Not at EOL, include one character
+                                                            (min (point-max) (1+ (point))))))
+                                                    changed-end-raw))
+                                     (window (or (get-buffer-window buffer)
+                                                 (display-buffer buffer)))
+                                     ;; Create unified diff preview
+                                     (diff-preview (agent-shell--format-diff-preview old-changed new-changed)))
+
+                                ;; Position window BEFORE creating overlay
+                                ;; The overlay's 'display property changes visual height, which makes
+                                ;; recenter miscalculate window-start. We must position first, then overlay.
+                                (when window
+                                  (agent-shell--position-window-at-change window buffer changed-start))
+
+                                ;; Create overlay showing the unified diff
+                                (let ((ov (make-overlay changed-start changed-end buffer t nil)))
+                                  (overlay-put ov 'face 'default)
+                                  (overlay-put ov 'priority 100)
+                                  (overlay-put ov 'display diff-preview)
+                                  (overlay-put ov 'agent-shell-permission-preview t)
+
+                                  ;; Store preview state for post-acceptance highlighting
+                                  (let ((preview-state (list :buffer buffer
+                                                             :overlays (list ov)
+                                                             :old-start old-start
+                                                             :old-end old-end
+                                                             :changed-start changed-start
+                                                             :changed-end changed-end
+                                                             :new-changed new-changed
+                                                             :path path)))
+                                    ;; Store in agent-shell buffer's local variable
+                                    (with-current-buffer agent-shell-buffer
+                                      (setf (alist-get tool-call-id agent-shell--permission-preview-state nil nil #'equal)
+                                            preview-state)))
+
+                                  buffer)))))))))))))))
+
+(defun agent-shell--remove-permission-preview (tool-call-id)
+  "Remove permission preview for TOOL-CALL-ID."
+  (if-let ((preview-state (alist-get tool-call-id agent-shell--permission-preview-state nil nil #'equal)))
+      (progn
+        (let ((overlays (plist-get preview-state :overlays))
+              (buffer (plist-get preview-state :buffer))
+              (changed-start (plist-get preview-state :changed-start))
+              (changed-end (plist-get preview-state :changed-end)))
+          (dolist (ov overlays)
+            (when (overlayp ov)
+              (delete-overlay ov)))
+          ;; If we inserted a temporary newline at EOF for the overlay, remove it
+          (when (and buffer (buffer-live-p buffer) changed-start changed-end)
+            (with-current-buffer buffer
+              (let ((inhibit-read-only t))
+                (save-excursion
+                  (goto-char changed-start)
+                  ;; Check if we inserted exactly one newline at what was EOF
+                  (when (and (= changed-end (1+ changed-start))
+                             (= changed-end (point-max))
+                             (looking-at "\n\\'"))
+                    (delete-char 1)))))))
+        (setf (alist-get tool-call-id agent-shell--permission-preview-state nil t #'equal) nil))))
+
+(defun agent-shell--compute-edit-region (old-text new-text)
+  "Compute the actual changed region between OLD-TEXT and NEW-TEXT.
+Returns a cons cell (UNCHANGED-PREFIX-LEN . CHANGED-NEW-TEXT) or nil."
+  (when (and old-text new-text)
+    (let* ((old-len (length old-text))
+           (new-len (length new-text))
+           (min-len (min old-len new-len))
+           ;; Find common prefix using compare-strings with binary search
+           (prefix-len 0))
+      ;; Binary search for longest common prefix
+      (let ((low 0)
+            (high min-len))
+        (while (< low high)
+          (let ((mid (ceiling (/ (+ low high 1.0) 2))))
+            (if (eq t (compare-strings old-text 0 mid new-text 0 mid))
+                (setq low mid)  ; mid matches, try higher
+              (setq high (1- mid)))))  ; mid doesn't match, try lower
+        (setq prefix-len low))
+
+      ;; Find common suffix
+      (let ((suffix-len 0)
+            (max-suffix (- min-len prefix-len)))
+        (while (and (< suffix-len max-suffix)
+                    (eq (aref old-text (- old-len suffix-len 1))
+                        (aref new-text (- new-len suffix-len 1))))
+          (setq suffix-len (1+ suffix-len)))
+
+        ;; Extract the changed portion of new-text
+        (let ((changed-text (substring new-text prefix-len (- new-len suffix-len))))
+          (cons prefix-len changed-text))))))
+
+(defun agent-shell--follow-to-location (location &optional diff-info)
+  "Visit the file and position specified by LOCATION.
+
+LOCATION is an alist with 'path and optional 'line keys.
+DIFF-INFO is an optional alist with ':old, ':new, and ':file keys for highlighting.
+Respects `agent-shell-follow-edits' setting for display behavior."
+  (when agent-shell-follow-edits
+    (let ((raw-path (map-elt location 'path)))
+      (when-let ((path (agent-shell--resolve-path raw-path)))
+        (let ((buffer (or (find-buffer-visiting path)
+                          (find-file-noselect path)))
+              (line (map-elt location 'line))
+              (old-text (map-elt diff-info :old))
+              (new-text (map-elt diff-info :new)))
+          (when buffer
+            ;; Display buffer in another window without selecting it
+            (let ((window (display-buffer buffer)))
+              (when window
+                (with-current-buffer buffer
+                  (let ((target-pos
+                         (cond
+                          ;; First: Use ACP-provided line number
+                          ((and line (numberp line))
+                           (save-excursion
+                             (goto-char (point-min))
+                             (forward-line line)
+                             (point)))
+                          ;; Fallback: Search for old text if no line number
+                          ((and old-text new-text)
+                           (save-excursion
+                             (goto-char (point-min))
+                             (if (search-forward old-text nil t)
+                                 (match-beginning 0)
+                               ;; Search failed: stay at current point
+                               (point))))
+                          ;; Last resort: Don't move, stay at current point
+                          (t (point)))))
+                    ;; Position window without selecting it
+                    (agent-shell--position-window-at-change window buffer target-pos)))))))))))
+
+(defun agent-shell--tool-call-in-permission-queue-p (state tool-call-id)
+  "Check if TOOL-CALL-ID is in STATE's permission queue or is current permission."
+  (with-current-buffer (map-elt state :buffer)
+    (or
+     ;; Check if it's the current permission being shown
+     (when agent-shell--current-permission
+       (let-alist agent-shell--current-permission
+         (equal .params.toolCall.toolCallId tool-call-id)))
+     ;; Check if it's in the queue
+     (seq-find (lambda (req)
+                 (let-alist req
+                   (equal .params.toolCall.toolCallId tool-call-id)))
+               agent-shell--permission-queue))))
+
+(defun agent-shell--maybe-follow-tool-call (state tool-call-id)
+  "Maybe follow to the location of tool call identified by TOOL-CALL-ID in STATE.
+
+Uses `agent-shell-follow-edits-delay' to debounce rapid location changes.
+Skips following if the tool call is awaiting permission (queued or current)."
+  (when agent-shell-follow-edits
+    ;; Don't follow if this tool call is waiting for permission
+    ;; The permission preview will handle showing the location
+    (unless (agent-shell--tool-call-in-permission-queue-p state tool-call-id)
+      (when-let ((tool-call (map-nested-elt state `(:tool-calls ,tool-call-id))))
+        (let ((kind (map-elt tool-call :kind))
+              (locations (map-elt tool-call :locations))
+              (content (map-elt tool-call :content)))
+          (when (and kind
+                     (memq (intern kind) '(edit write))
+                     locations)
+            (let ((location (if (vectorp locations)
+                                (and (> (length locations) 0)
+                                     (aref locations 0))
+                              (car locations)))
+                  (diff-info (map-elt tool-call :diff))
+                  (source-buffer (current-buffer)))
+              (when agent-shell--follow-timer
+                (cancel-timer agent-shell--follow-timer))
+              (setq agent-shell--follow-timer
+                    (run-with-timer
+                     agent-shell-follow-edits-delay
+                     nil
+                     (lambda ()
+                       (when (buffer-live-p source-buffer)
+                         (with-current-buffer source-buffer
+                           (agent-shell--follow-to-location location diff-info)))))))))))))
 
 (cl-defun agent-shell--prompt-for-permission (&key model on-choice)
   "Prompt user for permission using MODEL and invoke ON-CHOICE.
@@ -1352,6 +2069,15 @@ by default."
   (interactive)
   (setq acp-logging-enabled (not acp-logging-enabled))
   (message "Logging: %s" (if acp-logging-enabled "ON" "OFF")))
+
+(defun agent-shell-toggle-follow-edits ()
+  "Toggle automatic following of agent edits.
+
+When enabled, files being edited by the agent are automatically
+displayed in another window without disrupting your workflow."
+  (interactive)
+  (setq agent-shell-follow-edits (not agent-shell-follow-edits))
+  (message "Follow edits: %s" (if agent-shell-follow-edits "ON" "OFF")))
 
 (defun agent-shell-reset-logs ()
   "Reset all log buffers."
