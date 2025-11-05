@@ -458,6 +458,35 @@ Extensions should use this instead of `agent-shell--resolve-path'
 to ensure consistent path handling across the system."
   (agent-shell--resolve-path path))
 
+(defun agent-shell-send-permission-response (request-id option-id &optional buffer)
+  "Send permission response for REQUEST-ID with OPTION-ID.
+BUFFER defaults to current buffer.
+Returns non-nil on success.
+
+This function is intended for use by extensions implementing custom
+permission queueing via `agent-shell-permission-request-functions'.
+It sends the ACP response and cleans up the permission dialog UI.
+
+Extensions that intercept permissions are responsible for calling this
+function to send responses at the appropriate time."
+  (when-let ((state (agent-shell-get-state buffer))
+             (client (map-elt state :client)))
+    (with-current-buffer (or buffer (current-buffer))
+      ;; Find the tool-call-id for this request
+      (when-let ((tool-call-entry
+                  (seq-find (lambda (entry)
+                              (equal (map-elt (cdr entry) :permission-request-id)
+                                     request-id))
+                            (map-elt state :tool-calls))))
+        (let ((tool-call-id (car tool-call-entry)))
+          (agent-shell--send-permission-response
+           :client client
+           :request-id request-id
+           :option-id option-id
+           :state state
+           :tool-call-id tool-call-id)
+          t)))))
+
 (defun agent-shell-interrupt (&optional force)
   "Interrupt in-progress request and reject all pending permissions.
 When FORCE is non-nil, skip confirmation prompt."
