@@ -157,6 +157,21 @@ Functions can return:
   :type 'hook
   :group 'agent-shell)
 
+(defcustom agent-shell-file-write-functions nil
+  "Abnormal hook run after a file is successfully written.
+Each function is called with STATE, PATH, CONTENT, and TOOL-CALL-ID.
+
+Functions receive:
+  - STATE: agent shell state
+  - PATH: absolute file path that was written
+  - CONTENT: full file content that was written
+  - TOOL-CALL-ID: tool call ID that triggered the write (may be nil)
+
+This hook is called after the file is written and saved, but before
+the ACP response is sent."
+  :type 'hook
+  :group 'agent-shell)
+
 (cl-defun agent-shell--make-acp-client (&key command
                                              command-params
                                              environment-variables
@@ -928,6 +943,19 @@ If the buffer's file has changed, prompt the user to reload it."
             ;; No open buffer, write to file directly.
             (with-temp-file path
               (insert content)))
+          ;; Find tool-call-id for this write operation
+          (let ((tool-call-id
+                 (car (seq-find (lambda (entry)
+                                  (let* ((tc-data (cdr entry))
+                                         (tc-raw-input (map-elt tc-data :rawInput))
+                                         (tc-path (and tc-raw-input
+                                                      (map-elt tc-raw-input 'file_path))))
+                                    (and tc-path
+                                         (string= (agent-shell--resolve-path tc-path) path))))
+                                (map-elt state :tool-calls)))))
+            ;; Run extension hooks after write completes but before response
+            (run-hook-with-args 'agent-shell-file-write-functions
+                                state path content tool-call-id))
           (acp-send-response
            :client (map-elt state :client)
            :response (acp-make-fs-write-text-file-response
