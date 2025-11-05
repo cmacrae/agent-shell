@@ -433,6 +433,15 @@ Returns non-nil on success."
     (agent-shell--save-tool-call state tool-call-id data)
     t))
 
+(defun agent-shell-resolve-path (path)
+  "Resolve PATH using configured path resolver.
+This applies any path transformations configured via
+`agent-shell-path-resolver-function'.
+
+Extensions should use this instead of `agent-shell--resolve-path'
+to ensure consistent path handling across the system."
+  (agent-shell--resolve-path path))
+
 (defun agent-shell-interrupt (&optional force)
   "Interrupt in-progress request and reject all pending permissions.
 When FORCE is non-nil, skip confirmation prompt."
