@@ -141,6 +141,22 @@ the dialog block is updated in the UI."
   :type 'hook
   :group 'agent-shell)
 
+(defcustom agent-shell-permission-request-functions nil
+  "Abnormal hook run when a permission request is received.
+Each function is called with STATE and REQUEST alist.
+If any function returns non-nil, default permission handling is skipped.
+This allows extensions to implement custom permission queueing.
+
+Functions receive:
+  - STATE: agent shell state
+  - REQUEST: full request alist from session/request_permission
+
+Functions can return:
+  - nil: Continue with default handling
+  - non-nil: Skip default handling (extension handles it)"
+  :type 'hook
+  :group 'agent-shell)
+
 (cl-defun agent-shell--make-acp-client (&key command
                                              command-params
                                              environment-variables
@@ -745,28 +761,31 @@ Flow:
   "Handle incoming request using SHELL, STATE, and REQUEST."
   (let-alist request
     (cond ((equal .method "session/request_permission")
-           (agent-shell--save-tool-call
-            state .params.toolCall.toolCallId
-            (append (list (cons :title .params.toolCall.title)
-                          (cons :status .params.toolCall.status)
-                          (cons :kind .params.toolCall.kind)
-                          (cons :permission-request-id .id))
-                    (when-let ((diff (agent-shell--make-diff-info .params.toolCall.content)))
-                      (list (cons :diff diff)))))
-           (agent-shell--update-dialog-block
-            :state state
-            ;; block-id must be the same as the one used
-            ;; in agent-shell--delete-dialog-block param.
-            :block-id (format "permission-%s" .params.toolCall.toolCallId)
-            :body (with-current-buffer (map-elt state :buffer)
-                    (agent-shell--make-tool-call-permission-text
-                     :request request
-                     :client (map-elt state :client)
-                     :state state))
-            :expanded t
-            :navigation 'never)
-           (agent-shell-jump-to-latest-permission-button-row)
-           (map-put! state :last-entry-type "session/request_permission"))
+           ;; Run extension hooks first - if any return non-nil, skip default handling
+           (unless (run-hook-with-args-until-success 'agent-shell-permission-request-functions
+                                                       state request)
+             (agent-shell--save-tool-call
+              state .params.toolCall.toolCallId
+              (append (list (cons :title .params.toolCall.title)
+                            (cons :status .params.toolCall.status)
+                            (cons :kind .params.toolCall.kind)
+                            (cons :permission-request-id .id))
+                      (when-let ((diff (agent-shell--make-diff-info .params.toolCall.content)))
+                        (list (cons :diff diff)))))
+             (agent-shell--update-dialog-block
+              :state state
+              ;; block-id must be the same as the one used
+              ;; in agent-shell--delete-dialog-block param.
+              :block-id (format "permission-%s" .params.toolCall.toolCallId)
+              :body (with-current-buffer (map-elt state :buffer)
+                      (agent-shell--make-tool-call-permission-text
+                       :request request
+                       :client (map-elt state :client)
+                       :state state))
+              :expanded t
+              :navigation 'never)
+             (agent-shell-jump-to-latest-permission-button-row)
+             (map-put! state :last-entry-type "session/request_permission")))
           ((equal .method "fs/read_text_file")
            (agent-shell--on-fs-read-text-file-request
             :state state
