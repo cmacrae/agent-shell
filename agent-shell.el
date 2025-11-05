@@ -400,6 +400,23 @@ Returns an empty string if no icon should be displayed."
   (interactive)
   (message "agent-shell v%s" agent-shell--version))
 
+;;; Extension API
+
+(defun agent-shell-get-state (&optional buffer)
+  "Get agent shell state from BUFFER (defaults to current buffer).
+Returns nil if buffer is not an agent-shell buffer.
+Note: The returned state should be treated as read-only by extensions."
+  (with-current-buffer (or buffer (current-buffer))
+    (when (and (boundp 'agent-shell--state)
+               (derived-mode-p 'agent-shell-mode))
+      agent-shell--state)))
+
+(defun agent-shell-get-client (&optional buffer)
+  "Get ACP client from BUFFER's agent shell state.
+BUFFER defaults to current buffer.
+Returns nil if buffer is not an agent-shell buffer."
+  (map-elt (agent-shell-get-state buffer) :client))
+
 (defun agent-shell-interrupt (&optional force)
   "Interrupt in-progress request and reject all pending permissions.
 When FORCE is non-nil, skip confirmation prompt."
