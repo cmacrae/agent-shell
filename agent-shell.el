@@ -126,6 +126,21 @@ See https://github.com/xenodium/agent-shell/issues/119"
   :type 'boolean
   :group 'agent-shell)
 
+(defcustom agent-shell-tool-call-update-functions nil
+  "Abnormal hook run when a tool call is updated.
+Each function is called with STATE and UPDATE alist, where UPDATE contains:
+  - toolCallId: string
+  - status: string (pending, in_progress, completed, failed)
+  - content: tool call content array
+  - locations: array of location objects (path, line)
+
+Functions should not modify STATE or UPDATE directly.
+
+This hook is called after tool call state is updated but before
+the dialog block is updated in the UI."
+  :type 'hook
+  :group 'agent-shell)
+
 (cl-defun agent-shell--make-acp-client (&key command
                                              command-params
                                              environment-variables
@@ -595,6 +610,8 @@ Flow:
                                 (cons :content (map-elt update 'content)))
                           (when-let ((diff (agent-shell--make-diff-info (map-elt update 'content))))
                             (list (cons :diff diff)))))
+                 ;; Run extension hooks after state update but before UI update
+                 (run-hook-with-args 'agent-shell-tool-call-update-functions state update)
                  (let* ((diff (map-nested-elt state `(:tool-calls ,.toolCallId :diff)))
                         (output (concat
                                  "\n\n"
