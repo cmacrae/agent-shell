@@ -172,6 +172,22 @@ the ACP response is sent."
   :type 'hook
   :group 'agent-shell)
 
+(defcustom agent-shell-permission-response-functions nil
+  "Abnormal hook run after a permission response is sent.
+Each function is called with STATE, REQUEST-ID, TOOL-CALL-ID, OPTION-ID, and CANCELLED.
+
+Functions receive:
+  - STATE: agent shell state
+  - REQUEST-ID: the permission request ID
+  - TOOL-CALL-ID: tool call ID that required permission
+  - OPTION-ID: the selected option ID (nil if cancelled)
+  - CANCELLED: non-nil if permission was cancelled/rejected
+
+This hook is called after the ACP response is sent and dialog is cleaned up.
+Extensions can use this to clean up their own state (e.g., preview overlays)."
+  :type 'hook
+  :group 'agent-shell)
+
 (cl-defun agent-shell--make-acp-client (&key command
                                              command-params
                                              environment-variables
@@ -198,6 +214,14 @@ wrapped with the runner prefix."
   "Whether agents are initialized with read/write text file capabilities.
 
 See `acp-make-initialize-request' for details."
+  :type 'boolean
+  :group 'agent-shell)
+
+(defcustom agent-shell-show-permission-diff-button t
+  "Whether to show the View button in permission dialogs for file edits.
+When non-nil, displays a button allowing users to view diffs in a separate
+buffer.  Extensions that provide their own inline diff preview can set this
+to nil."
   :type 'boolean
   :group 'agent-shell)
 
@@ -2583,7 +2607,7 @@ For example:
                                        ;; May as well interrupt so you can course-correct.
                                        (agent-shell-interrupt t))))))
                    ;; Add diff keybinding if diff info is available
-                   (when diff
+                   (when (and diff agent-shell-show-permission-diff-button)
                      (define-key map "v" (agent-shell--make-diff-viewing-function
                                           :diff diff
                                           :actions actions
@@ -2594,7 +2618,7 @@ For example:
                    ;; Add interrupt keybinding
                    (define-key map (kbd "C-c C-c") #'agent-shell-interrupt)
                    map))
-         (diff-button (when diff
+         (diff-button (when (and diff agent-shell-show-permission-diff-button)
                         (agent-shell--make-permission-button
                          :text "View (v)"
                          :help "Press v to view diff"
@@ -2679,6 +2703,9 @@ MESSAGE-TEXT: Optional message to display after sending the response."
   ;; block-id must be the same as the one used as
   ;; agent-shell--update-dialog-block param by "session/request_permission".
   (agent-shell--delete-dialog-block :state state :block-id (format "permission-%s" tool-call-id))
+  ;; Run extension hooks after response sent and dialog cleaned up
+  (run-hook-with-args 'agent-shell-permission-response-functions
+                      state request-id tool-call-id option-id cancelled)
   (let ((updated-tool-calls (map-copy (map-elt state :tool-calls))))
     (map-delete updated-tool-calls tool-call-id)
     (map-put! state :tool-calls updated-tool-calls))
