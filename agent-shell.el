@@ -487,6 +487,17 @@ function to send responses at the appropriate time."
            :tool-call-id tool-call-id)
           t)))))
 
+(defun agent-shell-delete-dialog-block (block-id &optional buffer)
+  "Delete dialog block BLOCK-ID from BUFFER.
+BUFFER defaults to current buffer.
+Returns non-nil on success.
+
+This function is intended for use by extensions that create custom
+dialog blocks and need to clean them up later."
+  (when-let ((state (agent-shell-get-state buffer)))
+    (agent-shell--delete-dialog-block :state state :block-id block-id)
+    t))
+
 (defun agent-shell-interrupt (&optional force)
   "Interrupt in-progress request and reject all pending permissions.
 When FORCE is non-nil, skip confirmation prompt."
