@@ -645,9 +645,13 @@ Flow:
                               (cons :kind (map-elt update 'kind))
                               (cons :command (map-nested-elt update '(rawInput command)))
                               (cons :description (map-nested-elt update '(rawInput description)))
-                              (cons :content (map-elt update 'content)))
+                              (cons :content (map-elt update 'content))
+                              (cons :locations (map-elt update 'locations))
+                              (cons :rawInput (map-elt update 'rawInput)))
                         (when-let ((diff (agent-shell--make-diff-info (map-elt update 'content))))
                           (list (cons :diff diff)))))
+               ;; Run extension hooks after state update but before UI update
+               (run-hook-with-args 'agent-shell-tool-call-update-functions state update)
                (let ((tool-call-labels (agent-shell-make-tool-call-label
                                         state (map-elt update 'toolCallId))))
                  (agent-shell--update-dialog-block
