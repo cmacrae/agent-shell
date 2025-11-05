@@ -417,6 +417,22 @@ BUFFER defaults to current buffer.
 Returns nil if buffer is not an agent-shell buffer."
   (map-elt (agent-shell-get-state buffer) :client))
 
+(defun agent-shell-tool-call-get (tool-call-id &optional buffer)
+  "Get tool call data for TOOL-CALL-ID from BUFFER's agent shell state.
+BUFFER defaults to current buffer.
+Returns the tool call alist or nil if not found."
+  (when-let ((state (agent-shell-get-state buffer)))
+    (map-nested-elt state (list :tool-calls tool-call-id))))
+
+(defun agent-shell-tool-call-put (tool-call-id data &optional buffer)
+  "Store tool call DATA for TOOL-CALL-ID in BUFFER's agent shell state.
+BUFFER defaults to current buffer.
+DATA should be an alist that will be merged with existing data.
+Returns non-nil on success."
+  (when-let ((state (agent-shell-get-state buffer)))
+    (agent-shell--save-tool-call state tool-call-id data)
+    t))
+
 (defun agent-shell-interrupt (&optional force)
   "Interrupt in-progress request and reject all pending permissions.
 When FORCE is non-nil, skip confirmation prompt."
